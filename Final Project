@@ -1,0 +1,497 @@
+#Libraries
+library(sf)
+library(plyr)
+library(dplyr)
+library(spdep)
+library(GISTools)
+library(raster)
+library(maptools)
+library(rgdal)
+library(spatstat)
+library(sp)
+library(spatstat)
+library(tmap)
+library(gstat)
+library(spgwr)
+
+install.packages("spgwr")
+
+
+#Set working directory
+dir <- ("/Users/davidwarren/Desktop/4thYearUvic/Geog418/Assignments/final_project")
+setwd(dir)
+
+#Reading in particulate matter dataset
+pm25 <- read.csv("PM25.csv") #Read in PM2.5 data
+#Select only columns 1 and 2
+pm25 <- pm25[,1:2]
+#Change the column names 
+colnames(pm25) <- c("POSTALCODE", "PM25")
+pm25 <- na.omit(pm25)
+
+#Reading in postal code shapefile
+postalcodes <- shapefile("./BC_PostalCodes/BC_Postal_Codes") #Read in related postal code data
+crs(postalcodes)
+postalcodes <- spTransform(postalcodes, CRS("+proj=longlat +datum=NAD83 +no_defs +ellps=GRS80 +towgs84=0,0,0"))
+#Reading in dissemination tract and income data
+income <- read.csv("Income.csv") #Read in census income data  
+colnames(income) <- c("DAUID", "Income") #Select only ID and Income columns
+census.tracts <- shapefile("./BC_DA/BC_DA.shp") #Read in dissemination tract shapefile
+income.tracts <- merge(census.tracts,income, by = "DAUID") #Merge income and dissemination data
+crs(income.tracts)
+census.tracts <- spTransform(census.tracts, CRS("+proj=longlat +datum=NAD83 +no_defs +ellps=GRS80 +towgs84=0,0,0"))
+nrow(income.tracts) #Determine the number of columns in the dataframe
+income.tracts <- income.tracts[!is.na(income.tracts$Income),]
+income.tracts <- spTransform(income.tracts, CRS("+proj=longlat +datum=NAD83 +no_defs +ellps=GRS80 +towgs84=0,0,0"))
+crs(income.tracts)
+#Create choropleth map of income
+med.income <- income.tracts$Income
+shades <- auto.shading(med.income, n=6, cols = brewer.pal(6, 'Oranges'))
+choropleth(income.tracts, med.income, shades) #map the data with associated colours
+choro.legend(3864000, 1965000, shades) #add a legend (you might need to change the location)
+
+#Select postal codes that fall within dissemination tracts)
+postalcodes <- intersect(postalcodes,income.tracts)
+plot(postalcodes) #See what the data looks like spatially
+head(postalcodes) #See what the data looks like in tabular form
+
+#Join PM2.5 data with postal code data
+pm25.spatial <- merge(postalcodes,pm25,by = "POSTALCODE")
+
+#Aggregate the PM2.5 values in each DA in order to have a single value per DA. Here we aggregate based on the mean.
+pm25.aggregate <- aggregate((as.numeric(pm25.spatial$PM25)/10)~pm25.spatial$DAUID,FUN=max)
+
+#Re-join aggregated data to the income.tracts layer.
+colnames(pm25.aggregate) <- c("DAUID", "PM25AGG") #Select only ID and Income columns
+income.pm25 <- merge(income.tracts,pm25.aggregate, by = "DAUID") #Merge income and dissemination data
+View(income.pm25@data)
+#Re-join aggregated data to the pm25.spatial points layer.
+pm25.points.aggregate <- merge(pm25.spatial, pm25.aggregate, by = "DAUID")
+
+#Create a subsample of the datapoints provided in the PM2.5 dataset using the sample n provided on CourseSpaces
+set.seed(60)
+sampleSize=60
+spSample <- pm25.points.aggregate[sample(1:length(pm25.points.aggregate),sampleSize),]
+View(spSample@data)
+#Create a grid called grd to use in your interpolation
+# Create an empty grid where n is the total number of cells
+grd <- as.data.frame(spsample(spSample, "regular", n=5000))
+names(grd)       <- c("X", "Y")
+coordinates(grd) <- c("X", "Y")
+gridded(grd)     <- TRUE  # Create SpatialPixel object
+fullgrid(grd)    <- TRUE  # Create SpatialGrid object
+proj4string(grd) <- proj4string(spSample)
+
+#Mean, standard deviation, median pm.25 measurements
+mean.pm25 <- mean(spSample$PM25AGG)
+sd.pm25 <- sd(spSample$PM25AGG, na.rm = T)
+median.pm25 <- median(spSample$PM25AGG, na.rm = T)
+
+#Mean, standard deviation, median, income
+mean.income <- mean(spSample$Income)
+sd.inc <- sd(spSample$Income, na.rm = T)
+median.inc <- median(spSample$Income, na.rm = T)
+
+#histogram PM 2.5
+PM25.Exposure <- (spSample$PM25AGG)
+hist_pm25 <- hist(PM25.Exposure, breaks=30, main = "PM25 concentration")
+plot(hist_pm25)
+
+#Skewness of PM 2.5 measurements
+pm25_skew <- skewness(PPM)
+
+#histogram of Income
+Earnings <- (spSample$Income)
+hist_inc <- hist(Earnings, breaks=30, main= "Income Levels in Greater Vancouver")
+
+
+#study site map
+tmap_mode("view")
+tm_shape(census.tracts) + 
+  tm_polygons() +
+  tm_shape(pm.income.poly) +
+  tm_fill(col = "red", alpha = 0.3,) +
+  tm_layout(title = "Greater Vancouver Study Area", title.position = c("RIGHT", "TOP"))+
+  tm_scale_bar(position = c("LEFT", "BOTTOM"))+
+  tm_compass(position = c("RIGHT", "TOP"))
+tmap_mode("plot")
+
+##############################
+
+van.nb <- poly2nb(income.pm25)
+van.net <- nb2lines(van.nb,coords=coordinates(income.pm25))
+
+
+tm_shape(income.pm25) + tm_borders(col='lightgrey') + 
+  tm_shape(van.net) + tm_lines(col='red')
+
+van.lw <- nb2listw(van.nb, zero.policy = TRUE, style = "W")
+print.listw(van.lw, zero.policy = TRUE)
+
+#Create and map a lagged mean for your variable
+income.pm25$IncLagMeans = lag.listw(van.lw, income.pm25$Income, zero.policy = TRUE)
+income.pm25$DifLagMean = abs(income.pm25$Income - income.pm25$IncLagMeans)
+#map the lagged mean 
+map_LagMean <- tm_shape(income.pm25) + 
+  tm_polygons(col = "DifLagMean", 
+              title = "Median Income\nLagged Means", 
+              style = "fisher", 
+              palette = "YlOrRd", n = 10, lwd = 0.3) 
+
+
+map_LagMean
+
+
+#create global morans I's listed weighting scheme
+van.mi <- moran.test(income.pm25$Income, van.lw, zero.policy = TRUE)
+van.mi
+
+
+moran.range <- function(lw) {
+  wmat <- listw2mat(lw)
+  return(range(eigen((wmat + t(wmat))/2)$values))
+}
+
+moran.range(van.lw)
+
+#assign values to variables used in z test
+mI <- van.mi$estimate[[1]]
+eI <- van.mi$estimate[[2]]
+var <- van.mi$estimate[[3]]
+
+z <- (mI-eI)/sqrt(var)
+
+#creating local moran's I 
+lisa.test <- localmoran(income.pm25$Income, van.lw)
+
+#add variables for Local moran's I to data frame
+income.pm25$Ii <- lisa.test[,1]
+income.pm25$E.Ii<- lisa.test[,2]
+income.pm25$Var.Ii<- lisa.test[,3]
+income.pm25$Z.Ii<- lisa.test[,4]
+income.pm25$P<- lisa.test[,5]
+
+#Map local Moran's I 
+tmap_mode("plot")
+map_LISA <- tm_shape(income.pm25) + 
+  tm_polygons(col = "Ii", 
+              title = "Local Moran'sI Income", 
+              style = "fisher", 
+              palette = "viridis", n = 6, lwd = 0.3)+ tm_legend(legend.outside=TRUE) 
+
+map_LISA
+
+
+
+moran.plot(income.pm25$Income, van.lw, zero.policy=NULL, spChk=NULL, labels=NULL, xlab="PM2.5(ppm)", 
+           ylab="Med Income", quiet=NULL)
+########################
+
+f.0 <- as.formula(PM25AGG ~ 1) 
+
+
+var.smpl <- variogram(f.0, spSample, cloud = FALSE) #, cutoff=1000000, width=89900)
+dat.fit  <- fit.variogram(var.smpl, fit.ranges = FALSE, fit.sills = FALSE,
+                          vgm(model="Exp"))
+
+plot(var.smpl, dat.fit)
+
+# Define the trend model
+f.0 <- as.formula(PM25AGG ~ 1) 
+
+# Perform the krige interpolation (note the use of the variogram model
+# created in the earlier step)
+dat.krg <- krige( f.0, spSample, grd, dat.fit)
+
+# Convert kriged surface to a raster object for clipping
+r <- raster(dat.krg)
+r.m <- mask(r, income.pm25)
+
+# Plot the map
+tm_shape(r) + 
+  tm_raster(n=10, palette="-RdBu",  
+            title="Projected pm2.5 surface") +
+  tm_shape(spSample) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+r   <- raster(dat.krg, layer="var1.var")
+r.m <- mask(r,income.pm25)
+
+tm_shape(r.m) + 
+  tm_raster(n=7, palette ="Reds",
+            title="Variance map \n(in squared ppm)") +tm_shape(spSample) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+r   <- sqrt(raster(dat.krg, layer="var1.var")) * 1.96
+r.m <- mask(r, income.pm25)
+
+tm_shape(r.m) + 
+  tm_raster(n=7, palette ="Reds",
+            title="95% CI map \n(ppm)") +tm_shape(spSample) + tm_dots(size=0.05) +
+  tm_legend(legend.outside=TRUE)
+#################################################
+##Spatial Interpolation with Polynomial Trends
+# Define the 1st order polynomial equation
+
+f.1 <- as.formula(PM25AGG ~ X + Y) 
+
+# Add X and Y to P
+spSample$X <- coordinates(spSample)[,1]
+spSample$Y <- coordinates(spSample)[,2]
+
+# Run the regression model
+lm.1 <- lm( f.1, data=spSample)
+
+# Use the regression model output to interpolate the surface
+dat.1st <- SpatialGridDataFrame(grd, data.frame(var1.pred = predict(lm.1, newdata=grd))) 
+
+# Clip the interpolated raster to Texas
+r   <- raster(dat.1st)
+r.m <- mask(r, income.pm25)
+
+# Plot the map
+tm_shape(r.m) + 
+  tm_raster(n=10, palette="-RdBu", 
+            title="Predicted PM2.5 \n(in ppm)") +
+  tm_shape(spSample) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+
+
+
+# Define the 2nd order polynomial equation
+f.2 <- as.formula(PM25AGG ~ X + Y + I(X*X)+I(Y*Y) + I(X*Y))
+
+# Add X and Y to P
+spSample$X <- coordinates(spSample)[,1]
+spSample$Y <- coordinates(spSample)[,2]
+
+# Run the regression model
+lm.2 <- lm( f.2, data=spSample)
+
+# Use the regression model output to interpolate the surface
+dat.2nd <- SpatialGridDataFrame(grd, data.frame(var1.pred = predict(lm.2, newdata=grd))) 
+
+# Clip the interpolated raster to Texas
+r   <- raster(dat.2nd)
+r.m <- mask(r, income.pm25)
+
+# Plot the map
+tm_shape(r.m) + 
+  tm_raster(n=10, palette="-RdBu", 
+            title="Predicted PM2.5 \n(in ppm)") +
+  tm_shape(spSample) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+##################################################
+##Spatial Interpolation with Kriging
+
+#f.1 <- as.formula(value ~ X + Y) 
+f.2 <- as.formula(PM25AGG ~ X + Y + I(X*X)+I(Y*Y) + I(X*Y))
+
+var.smpl <- variogram(f.2, spSample, cloud = FALSE) #, cutoff=1000000, width=89900)
+dat.fit  <- fit.variogram(var.smpl, fit.ranges = FALSE, fit.sills = FALSE,
+                          vgm(model="Exp"))
+plot(var.smpl, dat.fit)
+
+
+# Define the trend model
+#f.1 <- as.formula(value ~ X + Y) 
+
+# Perform the krige interpolation (note the use of the variogram model
+# created in the earlier step) #this can 
+dat.krg <- krige( f.2, spSample, grd, dat.fit)
+
+# Convert kriged surface to a raster object for clipping
+r <- raster(dat.krg)
+r.m <- mask(r, income.pm25)
+
+# Plot the map
+tm_shape(r.m) + 
+  tm_raster(n=10, palette="-RdBu",alpha = 0.8,  
+            title="Predicted PM2.5 \n(in ppm)", midpoint = NA) +
+  tm_shape(spSample) + tm_dots(size=0.05) +
+  tm_legend(legend.outside=TRUE)
+
+rv  <- raster(dat.krg, layer="var1.var")
+rv.m <- mask(r, income.pm25)
+
+tm_shape(rv.m) + 
+  tm_raster(n=7, palette ="Reds",
+            title="Variance map \n(in squared ppm)") +tm_shape(spSample) + tm_dots(size=0.05) +
+  tm_legend(legend.outside=TRUE)
+
+rc   <- sqrt(raster(dat.krg, layer="var1.var")) * 1.96
+rc.m <- mask(r, income.pm25)
+
+tm_shape(rc.m) + 
+  tm_raster(n=7, palette ="Reds",
+            title="95% CI map \n(in ppm)") +tm_shape(spSample) + tm_dots(size=0.05) +
+  tm_legend(legend.outside=TRUE)
+
+r <- raster(dat.krg) #use this r for regression and combination
+###########################################
+#step.1 <- aggregate(yourRasterFromKriging, fact=??, fun=mean)
+#plot(step.1)
+
+#Convert the raster dataset to points
+#step.2 <-  rasterToPoints(r,fun=NULL, spatial=FALSE, crs=crs(pm25.spatial))
+#step.2 <- as.data.frame(step.2) #convert the point dataset to a spatial dataframe
+#Coords <- step.2[,c("x", "y")]  #assign coordinates to a new object
+#crs <- crs(census.tracts) #utilize an existing projection
+#step.3 <- SpatialPointsDataFrame(coords = Coords, data = step.2, proj4string = crs) #create a spatial points dataframe
+#step.4 <- aggregate(x=step.3,by=income.tracts, FUN=mean) #aggregate points into census tracts
+#step.5 <- intersect(step.4,income.tracts)  #get the intersection of step.4 with the income.tracts dataset (this will take a while) 
+
+#You are now ready to perform a regression
+
+step.1 <- aggregate(r, fact=5, fun=mean)
+step.5 <- extract(r, income.tracts, fun=mean, sp=TRUE)
+pm.income.poly <- step.5
+View(pm.income.poly@data)
+names(pm.income.poly)[names(pm.income.poly) == "var1.pred"] <- "PM25"
+########################################
+######Linear Regression##########
+#Let's say your dataset with both PM2.5 and Income are stored in a dataset called pm.income.poly.
+View(pm.income.poly)
+sum(pm.income.poly$PM25, na.rm = TRUE)
+sum(is.na(pm.income.poly$PM25))
+#Plot income and PM2.5 from the pm.income.poly dataset you created
+plot(pm.income.poly$Income~pm.income.poly$PM25)
+
+
+#Notice that there are a lot of 0's in this dataset. If you decide to remove them, use the following line:
+pm.income.poly <- pm.income.poly[!is.na(pm.income.poly$PM25),]
+#pm.income.poly <- na.omit(pm.income.poly)
+
+#Now plot the data again
+plot(pm.income.poly$Income~pm.income.poly$PM25)
+#Perform a linear regression on the two variables. You should decide which one is dependent.
+lm.model <- lm(pm.income.poly$Income~pm.income.poly$PM25)
+#Add the regression model to the plot you created
+abline(lm.model)
+#Get the summary of the results
+summary(lm.model)
+
+#You want to determine if the model residuals are spatially clustered. 
+#First obtain the residuals from the model
+model.resids <- as.data.frame(residuals.lm(lm.model))
+#Then add the residuals to your spatialpolygon dataframe
+#pm.income.poly$residuals <- NA
+#model.resids <- data.frame(value= sample(0:3362, replace=TRUE))
+pm.income.poly$residuals <- residuals.lm(lm.model)
+#pm.income.poly$residuals <- model.resids
+#length(pm.income.poly)
+#length(residuals.lm(lm.model))
+#Observe the result to make sure it looks correct
+head(pm.income.poly)
+
+#Now, create choropleth map of residuals
+resids <- pm.income.poly$residuals
+shades <- auto.shading(resids, n=6, cols = brewer.pal(6, 'Greens'))
+choropleth(income.tracts, resids, shades) #map the data with associated colours
+
+tm_shape(pm.income.poly)+
+  tm_polygons(col = "residuals",
+              title = "residual values",
+              style = "fisher",
+              palette = "-RdBu", n=6, lwd = 0.25 , midpoint = NA)+ tm_legend(legend.outside=TRUE)
+
+#run global morans I on resids
+
+
+choro.legend(3864000, 1965000, shades) #add a legend (you might need to change the location)
+
+
+reg.nb <- poly2nb(pm.income.poly)
+reg.net <- nb2lines(reg.nb,coords=coordinates(pm.income.poly))
+
+
+tm_shape(pm.income.poly) + tm_borders(col='lightgrey') + 
+  tm_shape(reg.net) + tm_lines(col='red')
+
+reg.lw <- nb2listw(reg.nb, zero.policy = TRUE, style = "W")
+print.listw(reg.lw, zero.policy = TRUE)
+
+
+#create global morans I's listed weighting scheme
+reg.mi <- moran.test(pm.income.poly$residuals, reg.lw, zero.policy = TRUE)
+reg.mi
+
+
+moran.range <- function(reg.lw) {
+  wmat <- listw2mat(reg.lw)
+  return(range(eigen((wmat + t(wmat))/2)$values))
+}
+
+moran.range(reg.lw)
+
+#assign values to variables used in z test
+mI <- reg.mi$estimate[[1]]
+eI <- reg.mi$estimate[[2]]
+var <- reg.mi$estimate[[3]]
+
+z <- (mI-eI)/sqrt(var)
+##############################################
+####Geographically Weighted Regression
+
+#Let's say you are continuing with your data from the regression analysis. 
+
+#The first thing you need to do is to add the polygon coordinates to the spatialpolygondataframe.
+#You can obtain the coordinates using the "coordinates" function from the sp library
+pm.income.poly.coords <- sp::coordinates(pm.income.poly)
+#Observe the result
+head(pm.income.poly.coords)
+#Now add the coordinates back to the spatialpolygondataframe
+pm.income.poly$X <- pm.income.poly.coords[,1]
+pm.income.poly$Y <- pm.income.poly.coords[,2]
+head(pm.income.poly)
+
+###Determine the bandwidth for GWR: this will take a while
+GWRbandwidth <- gwr.sel(pm.income.poly$Income~pm.income.poly$PM25, 
+                        data=pm.income.poly, coords=cbind(pm.income.poly$X,pm.income.poly$Y),adapt=T) 
+
+###Perform GWR on the two variables with the bandwidth determined above
+###This will take a looooooong while
+gwr.model = gwr(pm.income.poly$Income~pm.income.poly$PM25, 
+                data=pm.income.poly, coords=cbind(pm.income.poly$X,pm.income.poly$Y), 
+                adapt=GWRbandwidth, hatmatrix=TRUE, se.fit=TRUE) 
+
+#Print the results of the model
+gwr.model
+
+#Look at the results in detail
+results<-as.data.frame(gwr.model$SDF)
+head(results)
+
+#Now for the magic. Let's add our local r-square values to the map
+pm.income.poly$localr <- results$localR2
+pm.income.poly <- subset.data.frame(pm.income.poly,pm.income.poly$localr>=0)
+#Create choropleth map of r-square values
+#local.r.square <- pm.income.poly$localr
+#shades <- auto.shading(local.r.square, n=6, cols = brewer.pal(6, 'Oranges'))
+#choropleth(income.tracts, local.r.square, shades) #map the data with associated colours
+#choro.legend(3864000, 1965000, shades) #add a legend (you might need to change the location)
+
+tm_shape(pm.income.poly)+
+  tm_polygons(col = "localr",
+              title = "local r^2 values",
+              style = "fisher",
+              palette = "-RdBu", n = 10, lwd = 0.25 , midpoint = NA)+ tm_legend(legend.outside=TRUE)
+
+#Time for more magic. Let's map the coefficients
+pm.income.poly$coeff <- results$pm.income.poly.PM25
+
+#Create choropleth map of the coefficients
+#local.coefficient <- pm.income.poly$coeff
+#shades <- auto.shading(local.coefficient, n=6, cols = brewer.pal(6, 'Oranges'))
+#choropleth(income.tracts, local.coefficient, shades) #map the data with associated colours
+#choro.legend(3864000, 1965000, shades) #add a legend (you might need to change the location)
+
+tm_shape(pm.income.poly)+
+  tm_polygons(col = "coeff",
+              title = "local coefficient values",
+              style = "fisher",
+              palette = "-RdBu", n = 10, lwd = 0.25 , midpoint = NA)+ tm_legend(legend.outside=TRUE)
+
+
+
+
